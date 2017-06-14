@@ -1,0 +1,12 @@
+---
+title: "Classifying cervixes by colour"
+author: "Sam Playle"
+date: "14 June 2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# 
