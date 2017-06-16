@@ -9,4 +9,387 @@ output: html_document
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
-# 
+# Predicting cervix classes by colour
+
+## Introduction 
+
+This analysis uses the data from the **Intel & MobileODT Cervical Cancer Screening** competition on Kaggle, which is at this URL: https://www.kaggle.com/c/intel-mobileodt-cervical-cancer-screening. The goal is to classify photographs of cervixes as types 1, 2 or 3.
+
+The training data consist of 250 photographs of type 1 cervixes, 781 photographs of type 2 cervixes and 450 photographs of type 3 cervixes. The test set data for the first round consists of 512 photographs of cervixes whose type is kept secret.
+
+We will attempt a basic analysis using only the colour profiles of the images for classification. 
+
+### Loading libraries
+
+```{r echo = T, warning = F, message = F}
+library(caret); library(jpeg); library(imager); library(dplyr)
+```
+
+The training and test data are saved in a different directory, in several different folders, so we write functions to find the relevant folders. 
+
+```{r echo = T}
+datadirectory <- "D:/CervicalCancerData/"
+
+dir <- function(n) {
+  ifelse(n > 0, 
+         paste(datadirectory, "train/Type_", n, sep = ""), 
+         ifelse(n==0,
+                paste(datadirectory, "test/", sep = ""),
+                paste(datadirectory, "test_stg2/", sep = "")
+         )
+  )
+}
+```
+
+We want to know "how much" of each colour appears in each jpeg. Our files have three colour channels (red, green, b lue) which can each be valued between 0 and 255: this means that there are $256^3 = `r 256^3`$ colours. Tabulating the frequency of each one would make the dataframe far too big, and lots of them are barely distinguishable to the naked eye. So we 'coarse grain' the colours by grouping the RGB values into 5 boxes each, so there are $5^3 = 125$ colours. The effect on the quality of the images is noticeable.  
+
+```{r echo = T}
+resizeim <- function(filepath){
+  im <- readJPEG(filepath)
+  imc <- suppressWarnings(as.cimg(im))
+  imr <- resize(imc, size_x = 150, size_y = 150)
+  imr
+}
+
+to125cols <- function(filepath){
+  imr <- resizeim(filepath)
+  # We want values of 1.00 to go in the .8 box
+  imd <- floor(4.9999*imr)
+  imd
+}
+```
+
+To illustrate, we'll plot three images (one from each class) along with their downsampled 125-colour versions on the line below.
+
+```{r echo = T}
+f1 <- paste(dir(1),"/1168.jpg", sep = "")
+f2 <- paste(dir(2),"/1049.jpg", sep = "")
+f3 <- paste(dir(3),"/261.jpg", sep = "")
+par(mfrow = c(2,3))
+plot(resizeim(f1))
+plot(resizeim(f2))
+plot(resizeim(f3))
+plot(to125cols(f1))
+plot(to125cols(f2))
+plot(to125cols(f3))
+```
+
+We can tally up the amount of each colour that appears in all our images. To do this, we represent each colour as an integer between 0 and 125: we map the colour $RGB$ onto the number $n = R + 5G + 5^2 G$. Using the `tabulate()` function, we count how many times each colour occurs.
+
+```{r echo = T}
+colorfreqs <- function(filepath) {
+  # Get the 125-colour version of the image
+  imd <- to125cols(filepath) 
+  x <- imd[,,1] + 5*imd[,,2] + 25*imd[,,3]
+  tabulate(x + 1, nbins = 125)
+}
+```
+
+Let's print an example of what this data looks like for one of the images. 
+
+```{r echo = T}
+colorfreqs(f1)
+```
+
+So we see that most of the 125 colours don't appear at all (being represented with a "0" in the table). 
+
+### Pre-processing the files
+
+Let's write some code that will go through all of our image files and transform the data into this format. For each cervix type (1, 2, 3 and unknown), we list all the files in the corresponding folder; compute their colour distributions, and save the data in a data frame. The data frames are saved as csv files. 
+
+```{r echo = T}
+# List all jpgs in a given folder
+filelist <- function(n) {
+  as.integer(
+    lapply(
+      list.files(dir(n)) ,  
+      function(x) strsplit(x, "\\.")[[1]][1]
+      )
+    )
+}
+
+# Make a data frame of colour distributions
+coldf <- function(n) {
+  files <- filelist(n)
+  x <- lapply(files, 
+              function(x) colorfreqs(
+                paste(
+                  dir(n), "/", x, ".jpg", sep = "")
+                )
+              )
+  y <- cbind(filelist(n), n, do.call(rbind,x))
+  dimnames(y)[[2]][1] <- "ID"
+  dimnames(y)[[2]][2] <- "type"
+  y
+}
+
+# Write csvs of the data frames
+writecsvs <- function() {
+  xtrain <- NULL
+  for (i in 0:3) {
+      filenamei <- paste("125colours",i,".csv", sep = "")
+      if(!file.exists(filenamei)){
+          x <- coldf(i)
+          write.csv(x, file = filenamei, row.names = FALSE)
+          if(x > 0){
+              xtrain <- rbind(xtrain,x)
+          }
+      }
+  }
+  if(!file.exists("125colourstrain.csv")){
+      write.csv(xtrain, file = "125colourstrain.csv", row.names = FALSE)
+  }
+}
+writecsvs()
+
+x <- read.csv("125colourstrain.csv")
+x$type <- as.factor(x$type)
+```
+
+## Using ratios of colour frequencies
+
+Instead of using the absolute amount of the various colours as features, it should be better to use the *ratios* between the various colours. This is because the photos are not taken under uniform conditions, and the cervixes take up widely varying proportions of the image. For example, in the first of the following two images, the cervix fills the whole frame, while the cervix takes up only a small fraction of the second image.
+
+```{r echo = T}
+f1a <- paste(dir(1),"/13.jpg", sep = "")
+f1b <- paste(dir(1),"/7.jpg", sep = "")
+par(mfrow = c(1,2))
+plot(resizeim(f1a))
+plot(resizeim(f1b))
+```
+
+Using the ratios of colours should remedy this, because the ratios of colours in the cervix are independent of how big the cervix is in the frame (if the cervix is scaled by a factor of $a$, then the respective amounts $n_1$ and $n_2$ of two colours $c_1$ and $c_2$ scale to $an_1$ and $an_2$, but their ratio remains $n_1/n_2$).
+
+### Using only pink and red colours
+
+We have 125 colours tabulated, so if we wanted to compare the ratios of the amounts of all of them, we would have $125\times 124 / 2 = 7750$ features. This would be a huge amount, more than five times larger than the number of samples in the training data.
+
+But we don't care about most of the colours. The cervixes themselves are various shades of pinkish-reddish, and we just want to compare the different types of cervix. Therefore, we will only consider the ratios of the various pinkish-reddish colours. To work out which ones these are, let's make a "colour chart" showing what our 125 colours look like:
+
+```{r echo = T}
+seq1 <- seq(from = 0, to = 4.8, by = 0.2)
+seq2 <- seq(from = 0, to = 0.8, by = 0.2)
+y <- expand.grid(seq1,seq2)
+red <- y[,2]
+green <- floor(y[,1])/5
+blue <- y[,1] - floor(y[,1])
+num <- as.integer(round(1 + 5*red + 25*green + 125*blue),0)
+plot(y[,1], 
+     y[,2], 
+     pch = 19,
+     cex = 4, 
+     col = rgb(red, green, blue), 
+     ylim = c(-.1,.9),
+     xlab = "b + 5 * g",
+     ylab = "r",
+     main = "Colour chart"
+     )
+text(y[,1], y[,2] - 0.065, labels = as.character(num), cex = .7)
+```
+
+So let's say that the following colours are the ones that count as reddish-pinkish.
+
+```{r echo= T}
+redorpink <- c(3,4,5,28,29,30,34,35,60,85,65,90,95,120)
+```
+
+## Training and validation sets
+
+
+In the first stage of the Kaggle competition, we had one training set of images whose labels we knew, and a test set whose labels were kept hidden. In this case, the best approach to validating our models was to split off a validation set from within the training set using the `createDataPartition()` function, for example. 
+
+In the second stage of the competition, the test set labels were released. We can use this data to add the stage 1 test set to our training set. But the stage 1 test set continues to be used for the scorechart on Kaggle, even in stage 2 after the "ground truth" has been made available. So to get an accurate estimate of our model's error rate, we should *not* use the stage 1 test set to train the model. Instead, we should use the *full* training set to train the model (including the data that was in the validation set for stage 1), and use the stage 1 test set for validation. 
+
+```{r echo = T}
+answers <- read.csv(paste(datadirectory, "solution_stg1_release.csv", sep = ""))
+whichtype <- answers$Type_1 + 2L*answers$Type_2 + 3L*answers$Type_3
+```
+
+```{r echo = T}
+# set.seed(12498)
+# inTrain <- createDataPartition(y = x$type, p = .7, list = F)
+training <- x #[inTrain,] 
+# testing <- x[-inTrain,]
+testing <- arrange(read.csv("125colours0.csv"),ID)
+# Replace the testing types with the "ground truth" values
+testing$type <- whichtype
+```
+
+Let's subset the data frames to contain only the reddish-pinkish colours. Then we re-order the columns by how frequently the colours tend to apply in the training set, so that when we compute the ratios they'll tend to be greater than 1.
+
+```{r echo = T}
+redorpinktrain <- training[,2+redorpink]
+redorpinktest <- testing[,2+redorpink]
+
+trainorder <- order(apply(redorpinktrain, 2, mean))
+
+rptrainplus1 <- 1 + redorpinktrain[,trainorder]
+rptestplus1 <- 1 + redorpinktest[,trainorder]
+
+trainratios <- NULL
+testratios <- NULL
+l <- length(trainorder)
+for (i in 1:(l-1)){
+  for (j in (i+1):l){
+    trainratij <- rptrainplus1[,j]/rptrainplus1[,i]
+    trainratios <- cbind(trainratios, trainratij)
+    testratij <- rptestplus1[,j]/rptestplus1[,i]
+    testratios <- cbind(testratios, testratij)
+  }
+}
+
+colnames(trainratios) <- paste("ratio",1:91,sep="")
+colnames(testratios) <- paste("ratio",1:91,sep="")
+
+trainingdf <- cbind(training[,c("ID","type")], trainratios)
+testingdf <- cbind(testing[,c("ID","type")], testratios)
+
+levels(trainingdf$type) <- paste("T", levels(trainingdf$type), sep="")
+levels(testingdf$type) <- paste("T", levels(testingdf$type), sep="")
+```
+
+With the data frames set up, let's train a model on the data. We will use the *conditional inference random forest* method, because that's the one that performed best at preliminary stages of investigation. 
+
+The goal in the Kaggle competition is to minimize the *logloss* of the predictions. Let us recall what that means. The predictions need to be submitted as a set of three probabilities $(p_{i1}, p_{i2}, p_{i3})$ for each picture, corresponding to the estimated probabilities of the picture $j_i$ being of type $t_1$, $t_2$ or $t_3$ respectively. We may denote the 'ground truth' value of the picture with the vector $v_i = (v_{i1}, v_{i2}, v_{i3})$ whose entries are all 0 or 1, so that, for example, if picture $j_{45}$ is type 3 then we have $v_{45} = (0,0,1)$. Then the *logloss* is given by the formula
+
+$$
+\text{logloss} = - \frac{1}{N} \sum_{i=1}^N \log \Big( \sum_{k=1}^3 v_{ik} p_{ik}  \Big) \, . 
+$$
+In words, for each picture in the test set, the formula takes the average of the logarithm of the estimated probability of the *true* answer, times minus one.
+
+Optimizing *logloss* is different from optimizing accuracy, where *accuracy* means that for each picture $j_i$ we predict the class based on which of the three probabilities $p_{ik}$ is largest, and then see which proportion we got right.
+
+```{r echo = T}
+control <- trainControl(verboseIter = TRUE, 
+                        number = 25, 
+                        classProbs=TRUE) 
+
+library(Metrics)
+
+makemodel <- function(){
+    if(!file.exists("model5.rds")){
+        # Random forest is pseudorandom so seed for reproducibility
+        set.seed(2124) 
+        model5 <- train(type ~ ., 
+                data = trainingdf, 
+                method = "cforest", 
+                metric = "Accuracy",
+                preProc = c("center", "scale"),
+                trControl = control
+                )
+        saveRDS(model5, "model5.rds")
+    } else {
+        model5 <- readRDS("model5.rds")
+        }
+  model5
+}
+model5 <- makemodel()
+
+probs5 <- predict(model5, 
+                  newdata = testingdf, 
+                  type = "prob"
+                  )
+
+logloss <- function(probs){ -sum(
+  log(probs$"T1"*(testing$type==1) 
+       + probs$"T2"*(testing$type==2) 
+       + probs$"T3"*(testing$type==3)
+       )
+  )/nrow(probs)
+}
+
+logloss(probs5)
+```
+
+Finding out which variables are most important
+
+```{r echo = T}
+loglosslist <- NULL
+for(i in 1:91){
+  print(i)
+  temp <- testingdf
+  temp[,i+2] <- sample(testingdf[,i+2])
+  probsi <- predict(model5, 
+                  newdata = temp, 
+                  type = "prob"
+                  )
+  loglossi <- logloss(probsi)
+  loglosslist <- c(loglosslist, loglossi)
+}
+```
+```{r echo = T}
+plot(loglosslist)
+bestvars <- loglosslist >  .873
+traindfred <- trainingdf[,c(T,T,bestvars)]
+#featurePlot(x = traindfred[,2:(2+sum(bestvars))],
+##            y = traindfred$type,
+#            plot = "pairs")
+```
+
+```{r echo = T}
+makeminimodel <- function(){
+    if(!file.exists("minimod1.rds")){
+        # Random forest is pseudorandom so seed for reproducibility
+        set.seed(2124) 
+        minimod1 <- train(type ~ ., 
+                data = traindfred, 
+                method = "cforest", 
+                metric = "Accuracy",
+                preProc = c("center", "scale"),
+                trControl = control
+                )
+        saveRDS(minimod1, "minimod1.rds")
+    } else {
+        minimod1 <- readRDS("minimod1.rds")
+        }
+  minimod1
+}
+minimod1 <- makeminimodel()
+
+traindfred <- testingdf[,c(T,T,bestvars)]
+redprobs <- predict(minimod1, 
+                  newdata = traindfred, 
+                  type = "prob"
+                  )
+
+logloss(redprobs)
+```
+
+So we get a small improvement of about 1% by focussing just on these variables. 
+
+Let's use this model to compute predictions for the test set and upload them to Kaggle. 
+
+Getting in the Kaggle data
+```{r echo = T}
+kagdata <- arrange(read.csv("125colours-1.csv"),ID)
+redorpinkkag <- kagdata[,2+redorpink]
+rpkagplus1 <- 1 + redorpinkkag[,trainorder]
+kagratios <- NULL
+l <- length(trainorder)
+for (i in 1:(l-1)){
+  for (j in (i+1):l){
+    kagratij <- rpkagplus1[,j]/rpkagplus1[,i]
+    kagratios <- cbind(kagratios, kagratij)
+  }
+}
+colnames(kagratios) <- paste("ratio",1:91,sep="")
+kagdf <- cbind(kagdata[,c("ID","type")], kagratios)
+levels(kagdf$type) <- paste("T", levels(kagdf$type), sep="")
+kagdfred <- kagdf[,c(T,T,bestvars)]
+```
+
+```{r echo = T}
+  probskag <- predict(minimod1, 
+                          newdata = kagdfred, 
+                          type = "prob"
+  )
+  kagdata$ID <- paste(kagdata$ID,".jpg",sep="")
+  
+  df <- cbind(kagdata$ID, probskag)
+  names(df) <- c("image_name","Type_1","Type_2","Type_3")
+  write.csv(df, 
+            file = "submission5.csv", 
+            row.names = FALSE, 
+            quote = FALSE
+  )
+```
