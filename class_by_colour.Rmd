@@ -41,6 +41,11 @@ dir <- function(n) {
 }
 ```
 
+
+
+
+## Analysing by colour frequencies
+
 We want to know "how much" of each colour appears in each jpeg. Our files have three colour channels (red, green, b lue) which can each be valued between 0 and 255: this means that there are $256^3 = `r 256^3`$ colours. Tabulating the frequency of each one would make the dataframe far too big, and lots of them are barely distinguishable to the naked eye. So we 'coarse grain' the colours by grouping the RGB values into 5 boxes each, so there are $5^3 = 125$ colours. The effect on the quality of the images is noticeable.  
 
 ```{r echo = T}
@@ -126,7 +131,7 @@ coldf <- function(n) {
 # Write csvs of the data frames
 writecsvs <- function() {
   xtrain <- NULL
-  for (i in 0:3) {
+  for (i in (-1):3) {
       filenamei <- paste("125colours",i,".csv", sep = "")
       if(!file.exists(filenamei)){
           x <- coldf(i)
@@ -141,9 +146,6 @@ writecsvs <- function() {
   }
 }
 writecsvs()
-
-x <- read.csv("125colourstrain.csv")
-x$type <- as.factor(x$type)
 ```
 
 ## Using ratios of colour frequencies
@@ -206,9 +208,11 @@ whichtype <- answers$Type_1 + 2L*answers$Type_2 + 3L*answers$Type_3
 ```
 
 ```{r echo = T}
+training <- read.csv("125colourstrain.csv")
+training$type <- as.factor(training$type)
 # set.seed(12498)
 # inTrain <- createDataPartition(y = x$type, p = .7, list = F)
-training <- x #[inTrain,] 
+# training <- x [inTrain,] 
 # testing <- x[-inTrain,]
 testing <- arrange(read.csv("125colours0.csv"),ID)
 # Replace the testing types with the "ground truth" values
@@ -248,16 +252,60 @@ levels(trainingdf$type) <- paste("T", levels(trainingdf$type), sep="")
 levels(testingdf$type) <- paste("T", levels(testingdf$type), sep="")
 ```
 
-With the data frames set up, let's train a model on the data. We will use the *conditional inference random forest* method, because that's the one that performed best at preliminary stages of investigation. 
+## Benchmark score
+
+In order to see how well we're doing, let's work out what score we'd get if we were to assign labels randomly.
 
 The goal in the Kaggle competition is to minimize the *logloss* of the predictions. Let us recall what that means. The predictions need to be submitted as a set of three probabilities $(p_{i1}, p_{i2}, p_{i3})$ for each picture, corresponding to the estimated probabilities of the picture $j_i$ being of type $t_1$, $t_2$ or $t_3$ respectively. We may denote the 'ground truth' value of the picture with the vector $v_i = (v_{i1}, v_{i2}, v_{i3})$ whose entries are all 0 or 1, so that, for example, if picture $j_{45}$ is type 3 then we have $v_{45} = (0,0,1)$. Then the *logloss* is given by the formula
 
 $$
-\text{logloss} = - \frac{1}{N} \sum_{i=1}^N \log \Big( \sum_{k=1}^3 v_{ik} p_{ik}  \Big) \, . 
+\text{logloss} = - \frac{1}{N} \sum_{i=1}^N \log \Big( \sum_{k=1}^3 v_{ik} p_{ik}  \Big) \, .
 $$
+
 In words, for each picture in the test set, the formula takes the average of the logarithm of the estimated probability of the *true* answer, times minus one.
 
 Optimizing *logloss* is different from optimizing accuracy, where *accuracy* means that for each picture $j_i$ we predict the class based on which of the three probabilities $p_{ik}$ is largest, and then see which proportion we got right.
+
+To get a benchmark value for *logloss*, let's estimate what proportion of the images are in each category, and set this proportion as the estimated probability, i.e. for every picture $j_i$ set $p_{ik} = (N_1/N, N_2/N, N_3/N)$, where $N_j$ is the total number of pictures of class $j$ in the dataset. Let's only use the training dataset for this computation, because we don't want to use any information from the validation dataset before checking our model. Then the number of pictures in each class is given by 
+```{r echo = T}
+counts <- table(training$type)
+counts
+```
+
+so for each image we set the probabilities to 
+
+```{r echo = T}
+bprobs <- as.numeric(counts/sum(counts))
+```
+
+```{r echo = T}
+benchmarkdf <- testing[,1:2]
+for(i in 1:3){
+  cnm <- paste("T",i,sep = "")
+  benchmarkdf[,cnm] <- bprobs[i]
+}
+head(benchmarkdf)
+```
+
+```{r echo = T}
+logloss <- function(probs){ -sum(
+  log(probs$"T1"*(testing$type==1) 
+       + probs$"T2"*(testing$type==2) 
+       + probs$"T3"*(testing$type==3)
+       )
+  )/nrow(probs)
+}
+```
+
+```{r echo = T}
+logloss(benchmarkdf)
+```
+
+
+## Training a model
+
+With the data frames set up, let's train a model on the data. We will use the *conditional inference random forest* method, because that's the one that performed best at preliminary stages of investigation. 
+
 
 ```{r echo = T}
 control <- trainControl(verboseIter = TRUE, 
@@ -290,20 +338,13 @@ probs5 <- predict(model5,
                   type = "prob"
                   )
 
-logloss <- function(probs){ -sum(
-  log(probs$"T1"*(testing$type==1) 
-       + probs$"T2"*(testing$type==2) 
-       + probs$"T3"*(testing$type==3)
-       )
-  )/nrow(probs)
-}
-
 logloss(probs5)
 ```
 
 Finding out which variables are most important
 
 ```{r echo = T}
+if(!file.exists("loglosslist.rds")){
 loglosslist <- NULL
 for(i in 1:91){
   print(i)
@@ -315,8 +356,13 @@ for(i in 1:91){
                   )
   loglossi <- logloss(probsi)
   loglosslist <- c(loglosslist, loglossi)
+  saveRDS(loglosslist,"loglosslist.rds")
+}
+} else {
+  loglosslist <- readRDS("loglosslist.rds")
 }
 ```
+
 ```{r echo = T}
 plot(loglosslist)
 bestvars <- loglosslist >  .873
@@ -357,11 +403,12 @@ logloss(redprobs)
 
 So we get a small improvement of about 1% by focussing just on these variables. 
 
-Let's use this model to compute predictions for the test set and upload them to Kaggle. 
+Let's use this model to compute predictions for the test set and upload them to Kaggle. gc
 
 Getting in the Kaggle data
 ```{r echo = T}
-kagdata <- arrange(read.csv("125colours-1.csv"),ID)
+stg2data <- arrange(read.csv("125colours-1.csv"),ID)
+kagdata <- rbind(testing,stg2data)
 redorpinkkag <- kagdata[,2+redorpink]
 rpkagplus1 <- 1 + redorpinkkag[,trainorder]
 kagratios <- NULL
