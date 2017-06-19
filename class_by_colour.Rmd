@@ -272,11 +272,14 @@ counts <- table(training$type)
 counts
 ```
 
-so for each image we set the probabilities to 
+so for each image we set the three probabilities to 
 
 ```{r echo = T}
 bprobs <- as.numeric(counts/sum(counts))
+bprobs
 ```
+
+Let's put these values into a data frame with the labels of the all the pictures in the testing dataset.
 
 ```{r echo = T}
 benchmarkdf <- testing[,1:2]
@@ -287,8 +290,11 @@ for(i in 1:3){
 head(benchmarkdf)
 ```
 
+Now we define a function which will compute the *logloss* of a dataframe of predictions for the testing dataset.
+
 ```{r echo = T}
-logloss <- function(probs){ -sum(
+logloss <- function(probs){ 
+  -sum(
   log(probs$"T1"*(testing$type==1) 
        + probs$"T2"*(testing$type==2) 
        + probs$"T3"*(testing$type==3)
@@ -296,6 +302,8 @@ logloss <- function(probs){ -sum(
   )/nrow(probs)
 }
 ```
+
+With this function, we can compute the benchmark *logloss*. This is, roughly, the score we would expect if our model was random. If we get a better (lower) score then our model is somewhat informative.
 
 ```{r echo = T}
 logloss(benchmarkdf)
@@ -307,13 +315,15 @@ logloss(benchmarkdf)
 With the data frames set up, let's train a model on the data. We will use the *conditional inference random forest* method, because that's the one that performed best at preliminary stages of investigation. 
 
 
-```{r echo = T}
+```{r echo = T, warning = F, message = F}
+# Set trainControl to train a model with the caret package
 control <- trainControl(verboseIter = TRUE, 
                         number = 25, 
                         classProbs=TRUE) 
 
-library(Metrics)
-
+# Define a function to check if we already have
+# a saved model and if not then to train
+# a conditional inference random forest
 makemodel <- function(){
     if(!file.exists("model5.rds")){
         # Random forest is pseudorandom so seed for reproducibility
@@ -331,30 +341,47 @@ makemodel <- function(){
         }
   model5
 }
+# Run the function to get the model
 model5 <- makemodel()
-
+# Use our trained model to provide probabilities for
+# the testing data frame
 probs5 <- predict(model5, 
                   newdata = testingdf, 
                   type = "prob"
                   )
-
+# Compute the logloss of the model's probabilities
 logloss(probs5)
 ```
 
-Finding out which variables are most important
+This score is significantly better than the random benchmark, which is interesting because this means we can reliably get information about the cervix types solely based on the distribution of colours.
+
+## Finding out which variables are most important
+
+It might be possible to develop a better model by honing in on the most significant variables (colour ratios) in our dataset and training a new model just on these variables.
+
+To define the "best" variables, we take the following approach. For each variable (colour ratio) in our dataset, we re-compute the *logloss* of the validation dataset with that variable randomly permuted. If a variable isn't very important, then permuting it won't have much effect on the accuracy of the model. Conversely, if randomizing a variable severely impacts the accuracy of the model then we know it's very important. 
+
+Let's make a list of the 91 re-computed *logloss*es (one for each variable to be randomized).
 
 ```{r echo = T}
 if(!file.exists("loglosslist.rds")){
-loglosslist <- NULL
+loglosslist <- NULL # Initalize empty list
 for(i in 1:91){
-  print(i)
+  print(i) # Track progress
+  # Reset the previous randomly permuted variable
   temp <- testingdf
+  # Permute the i'th feature
   temp[,i+2] <- sample(testingdf[,i+2])
+  # Make new predictions with the 
+  # partially permuted dataframe
   probsi <- predict(model5, 
                   newdata = temp, 
                   type = "prob"
                   )
+  # Compute the logloss of these
+  # new predictions
   loglossi <- logloss(probsi)
+  # Append this logloss to the list
   loglosslist <- c(loglosslist, loglossi)
   saveRDS(loglosslist,"loglosslist.rds")
 }
@@ -363,16 +390,27 @@ for(i in 1:91){
 }
 ```
 
-```{r echo = T}
-plot(loglosslist)
-bestvars <- loglosslist >  .873
-traindfred <- trainingdf[,c(T,T,bestvars)]
-#featurePlot(x = traindfred[,2:(2+sum(bestvars))],
-##            y = traindfred$type,
-#            plot = "pairs")
-```
+Let's plot the scores of all the variables - remember that a higher *logloss* is *worse*, which means that the variable is more important i.e. *better*:
 
 ```{r echo = T}
+plot(loglosslist)
+```
+
+We see that most of the variables seem to have neglible impact on the accuracy of the model when randomized. However, there are quite a few which stand out noticeably above the rest. Let's make a new training data frame subset to the variables whose randomization put the score above a certain cutoff, say, .873. 
+
+```{r echo = T}
+bestvars <- loglosslist >  .873
+traindfred <- trainingdf[,c(T,T,bestvars)]
+```
+
+This reduces the number of variables from `r length(bestvars)` to `r sum(bestvars)`.
+
+### Training a model on the best variables
+
+Let's train the same type of model on the new dataset:
+
+```{r echo = T}
+# Function to make the model
 makeminimodel <- function(){
     if(!file.exists("minimod1.rds")){
         # Random forest is pseudorandom so seed for reproducibility
@@ -390,22 +428,26 @@ makeminimodel <- function(){
         }
   minimod1
 }
+# Run the function
 minimod1 <- makeminimodel()
-
+# Create a testing dataframe reduced to
+# the same best variables
 traindfred <- testingdf[,c(T,T,bestvars)]
+# Compute the probabilities using the new model
 redprobs <- predict(minimod1, 
                   newdata = traindfred, 
                   type = "prob"
                   )
-
+# Evaluate the logloss
 logloss(redprobs)
 ```
 
 So we get a small improvement of about 1% by focussing just on these variables. 
 
-Let's use this model to compute predictions for the test set and upload them to Kaggle. gc
+Let's use this model to compute predictions for the test set and upload them to Kaggle.
 
-Getting in the Kaggle data
+First we need to import the "stage 2 data" and perform the same transformations we did to the rest of the data:
+
 ```{r echo = T}
 stg2data <- arrange(read.csv("125colours-1.csv"),ID)
 kagdata <- rbind(testing,stg2data)
@@ -425,6 +467,8 @@ levels(kagdf$type) <- paste("T", levels(kagdf$type), sep="")
 kagdfred <- kagdf[,c(T,T,bestvars)]
 ```
 
+Next we use the second model we trained to provide probabilities for the data. We output the dataframe as a .csv file in the correct format for Kaggle and upload it. 
+
 ```{r echo = T}
   probskag <- predict(minimod1, 
                           newdata = kagdfred, 
@@ -440,3 +484,9 @@ kagdfred <- kagdf[,c(T,T,bestvars)]
             quote = FALSE
   )
 ```
+
+## Discussion
+
+This model achieved a score of *logloss* = 0.86039, attaining position #161 on the leaderboard (this needs to be updated after the final scores are announced). Although not overwhelmingly impressive, this is still significantly better than the random benchmark, which is interesting considering that the training features we used didn't take any account of the positions of any of the pixels in the images. 
+
+In other attempts we also tried training a LeNet convolutional neural network (CNN) on the data, but the amount of data was seemingly not large enough to get a good performance. In future applications, it would be a good idea to use a *pre-trained* CNN, which would already "know" how to see objects in images and would merely have to learn the difference between the three classes of cervix.
